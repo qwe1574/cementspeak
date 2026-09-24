@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>CementSpeak AI — نسخة مستقلة (بدون إنترنت)</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#12161a">
 <style>
 :root{
   --bg:#12161a; --bg-2:#0d1013; --panel:#1c2329; --panel-2:#242c33; --line:#323c44;
@@ -176,7 +178,11 @@ select{ background:var(--bg-2); color:var(--text); border:1px solid var(--line);
         <p class="panel-title">إعدادات الصوت</p>
         <div class="row">
           <label class="hint" style="margin:0;">لهجة صوت الذكاء الاصطناعي:</label>
-          <select id="accentSelect"><option value="en-US">أمريكي</option><option value="en-GB">بريطاني</option><option value="en-IN">هندي</option></select>
+          <select id="accentSelect"><option value="en-GB" selected>بريطاني</option><option value="en-US">أمريكي</option><option value="en-IN">هندي</option></select>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <label class="hint" style="margin:0;">الصوت بالظبط:</label>
+          <select id="voiceSelect"><option value="">(تحميل الأصوات...)</option></select>
         </div>
         <p class="hint" id="micSupportNote" style="margin-top:8px;"></p>
       </div>
@@ -441,14 +447,48 @@ document.getElementById('genBtn').addEventListener('click', ()=>{
 
 /* ---------------- voice engine ---------------- */
 let voices = [];
-function loadVoices(){ voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : []; }
+function loadVoices(){
+  voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
+  populateVoiceSelect();
+}
 if('speechSynthesis' in window){ loadVoices(); window.speechSynthesis.onvoiceschanged = loadVoices; }
+
+function populateVoiceSelect(){
+  const accent = document.getElementById('accentSelect').value;
+  const sel = document.getElementById('voiceSelect');
+  const prevValue = sel.value;
+  const matches = voices.filter(v=> v.lang===accent) .concat(voices.filter(v=> v.lang && v.lang.startsWith(accent.slice(0,2)) && v.lang!==accent));
+  sel.innerHTML = '';
+  if(!matches.length){
+    sel.innerHTML = '<option value="">(هيستخدم الصوت الافتراضي)</option>';
+    return;
+  }
+  // prefer voices that sound more natural (often labelled "Network"/"Wavenet"/"Natural" or not "compact")
+  const scored = matches.map(v=>{
+    const n = v.name.toLowerCase();
+    let score = 0;
+    if(n.includes('network') || n.includes('wavenet') || n.includes('natural') || n.includes('neural') || n.includes('enhanced')) score += 3;
+    if(!v.localService) score += 1; // cloud voices usually sound better (need internet)
+    if(n.includes('female')) score += 0.5;
+    return {v, score};
+  }).sort((a,b)=> b.score-a.score);
+  scored.forEach(({v})=>{
+    const opt = document.createElement('option');
+    opt.value = v.name;
+    opt.textContent = v.name + (v.localService ? ' (أوفلاين)' : ' (محتاج نت — أطبع صوتًا)');
+    sel.appendChild(opt);
+  });
+  if([...sel.options].some(o=>o.value===prevValue)) sel.value = prevValue;
+}
+document.getElementById('accentSelect').addEventListener('change', populateVoiceSelect);
+
 function speak(text){
   return new Promise(resolve=>{
     if(!('speechSynthesis' in window)){ resolve(); return; }
     const u = new SpeechSynthesisUtterance(text);
     const lang = document.getElementById('accentSelect').value; u.lang = lang;
-    const v = voices.find(v=>v.lang===lang) || voices.find(v=>v.lang && v.lang.startsWith(lang.slice(0,2)));
+    const chosenName = document.getElementById('voiceSelect').value;
+    const v = voices.find(v=>v.name===chosenName) || voices.find(v=>v.lang===lang) || voices.find(v=>v.lang && v.lang.startsWith(lang.slice(0,2)));
     if(v) u.voice = v;
     u.rate = 0.95; u.onend = resolve; u.onerror = resolve;
     window.speechSynthesis.cancel(); window.speechSynthesis.speak(u);
@@ -668,6 +708,13 @@ document.getElementById('exportBtn').addEventListener('click', ()=>{
 
 loadState();
 })();
+</script>
+<script>
+if('serviceWorker' in navigator){
+  window.addEventListener('load', function(){
+    navigator.serviceWorker.register('sw.js').catch(function(){});
+  });
+}
 </script>
 </body>
 </html>
