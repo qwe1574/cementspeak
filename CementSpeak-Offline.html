@@ -145,6 +145,16 @@ select{ background:var(--bg-2); color:var(--text); border:1px solid var(--line);
         📴 النسخة دي مستقلة بالكامل: بياناتك بتتخزن على جهازك بس (مفيش إنترنت أو أي سيرفر). التصنيف وبناء المواقف بيشتغلوا بقواعد محلية بدل الذكاء الاصطناعي، فهيبقوا أبسط شوية من النسخة الأونلاين.
       </div>
       <div class="panel">
+        <p class="panel-title">🧠 ذكاء اصطناعي حقيقي (اختياري)</p>
+        <p class="hint">ضيفي مفتاح Gemini المجاني بتاعك عشان التصنيف وبناء المواقف يبقوا أذكى وقت ما يكون عندك نت. من غير مفتاح، أو من غير نت، هيرجع تلقائي للنظام المحلي البسيط.</p>
+        <div class="row">
+          <input type="text" id="geminiKeyInput" placeholder="الصقي مفتاح Gemini هنا" style="flex:1;">
+          <button class="btn btn-sm" id="saveKeyBtn">حفظ</button>
+        </div>
+        <p class="hint" id="keyStatus" style="margin-top:8px;"></p>
+        <p class="hint" style="margin:6px 0 0;">مفيش مفتاح؟ افتحي <b style="direction:ltr; display:inline-block;">aistudio.google.com/apikey</b> بحساب جوجل، واعملي مفتاح مجاني، والصقيه هنا. ⚠️ الخطة المجانية من جوجل بتستخدم بياناتك لتحسين موديلاتهم — متحطيش حاجة سرية.</p>
+      </div>
+      <div class="panel">
         <p class="panel-title">استيراد الجمل</p>
         <p class="hint">ارفع ملف CSV / TXT فيه جملك الإنجليزية، أو الصقها في المربع تحت (جملة في كل سطر).</p>
         <div class="row">
@@ -262,6 +272,40 @@ function classifyLocal(text){
   return bestScore > 0 ? best : 'equipment';
 }
 
+/* ---------------- optional Gemini AI (independent, user's own key) ---------------- */
+function getGeminiKey(){ try{ return localStorage.getItem('cementspeak_gemini_key') || ''; }catch(e){ return ''; } }
+function setGeminiKey(k){ try{ localStorage.setItem('cementspeak_gemini_key', k); }catch(e){} }
+function refreshKeyStatus(){
+  const k = getGeminiKey();
+  document.getElementById('geminiKeyInput').value = k ? '•'.repeat(Math.min(k.length,24)) : '';
+  document.getElementById('keyStatus').textContent = k ? '✅ المفتاح محفوظ — التصنيف والسيناريوهات هتستخدم ذكاء اصطناعي حقيقي وقت ما يكون عندك نت.' : 'مفيش مفتاح محفوظ حاليًا — شغالة بالنظام المحلي البسيط.';
+}
+document.getElementById('saveKeyBtn').addEventListener('click', ()=>{
+  const val = document.getElementById('geminiKeyInput').value.trim();
+  if(!val || val.startsWith('•')){ toast('الصقي مفتاح جديد الأول'); return; }
+  setGeminiKey(val); refreshKeyStatus(); toast('اتحفظ المفتاح');
+});
+async function callGemini(prompt){
+  const key = getGeminiKey();
+  if(!key) return null;
+  try{
+    const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+encodeURIComponent(key), {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({contents:[{parts:[{text: prompt}]}]})
+    });
+    if(!resp.ok) return null;
+    const data = await resp.json();
+    const c = data.candidates && data.candidates[0];
+    const text = c && c.content && c.content.parts && c.content.parts[0] && c.content.parts[0].text;
+    return text || null;
+  }catch(e){ return null; }
+}
+function parseJsonLoose(text){
+  if(!text) return null;
+  const cleaned = text.replace(/```json/gi,'').replace(/```/g,'').trim();
+  try{ return JSON.parse(cleaned); }catch(e){ return null; }
+}
+
 let state = { sentences: [] };
 let currentFilter = 'all', scenarioCat = 'all', scenario = null, stepIndex = 0;
 let recognition = null, listening = false;
@@ -334,18 +378,38 @@ document.getElementById('fileInput').addEventListener('change', async (e)=>{
 });
 
 /* ---------------- classify (local rules) ---------------- */
-document.getElementById('classifyBtn').addEventListener('click', ()=>{
+document.getElementById('classifyBtn').addEventListener('click', async ()=>{
   const box = document.getElementById('pasteBox');
   const raw = box.value.split('\n').map(s=>s.trim()).filter(Boolean);
   if(!raw.length){ toast('ضيف جمل الأول'); return; }
   const existingTexts = new Set(state.sentences.map(s=>s.text.toLowerCase()));
   const fresh = [...new Set(raw)].filter(s=>!existingTexts.has(s.toLowerCase()));
   if(!fresh.length){ toast('كل الجمل دي موجودة بالفعل'); return; }
-  fresh.forEach(text=>{
-    state.sentences.push({id:uid(), text, category:classifyLocal(text), status:'new', attempts:0, bestScore:0, goodCount:0, lastPracticed:null});
+
+  const btn = document.getElementById('classifyBtn');
+  let aiCats = null;
+  if(getGeminiKey()){
+    btn.disabled = true; btn.textContent = 'بيصنّف بالذكاء الاصطناعي...';
+    const list = fresh.map((s,i)=> (i+1)+'. '+s).join('\n');
+    const catKeys = CATS.map(c=>c.key).join(', ');
+    const prompt = 'Classify these English cement-plant sentences into categories (use exactly these keys): '+catKeys+'.\n'+
+      'equipment=operating/troubleshooting equipment, maintenance=maintenance work, safety=safety/PPE/emergency, meetings=planning meetings, quality=quality/lab, interview=job interview language, handover=shift handover, logistics=shipping/silos/stock.\n\n'+
+      'Sentences:\n'+list+'\n\nReply with ONLY a JSON array, no markdown: [{"i":1,"category":"equipment"}, ...]';
+    const raw2 = await callGemini(prompt);
+    const parsed = parseJsonLoose(raw2);
+    if(Array.isArray(parsed)) aiCats = parsed;
+    btn.disabled = false; btn.textContent = 'تصنيف الجمل';
+  }
+  fresh.forEach((text, idx)=>{
+    let cat = classifyLocal(text);
+    if(aiCats){
+      const found = aiCats.find(o=> Number(o.i)===idx+1);
+      if(found && CAT_MAP[found.category]) cat = found.category;
+    }
+    state.sentences.push({id:uid(), text, category:cat, status:'new', attempts:0, bestScore:0, goodCount:0, lastPracticed:null});
   });
   saveState(); box.value=''; render();
-  toast('اتصنّفت '+fresh.length+' جملة');
+  toast(aiCats ? 'اتصنّفت '+fresh.length+' جملة بالذكاء الاصطناعي' : 'اتصنّفت '+fresh.length+' جملة (محلي)');
 });
 
 /* ---------------- render: bank ---------------- */
@@ -406,22 +470,20 @@ function pickDueSentences(catKey, n){
 
 /* ---------------- local template-based scenario builder ---------------- */
 const GENERIC_PROMPTS = [
-  "Go ahead, tell me what's happening.", "What do you see right now?", "Can you walk me through it?",
-  "OK, what's your assessment?", "Alright, give me the details.", "Right, what's the situation?"
+  "Go ahead.", "Next point.", "Continue, please.", "And then?", "OK, what else?", "Carry on."
 ];
 const GENERIC_ACKS = [
-  "Got it, thanks for the update.", "Understood. Let's proceed.", "OK, noted.",
-  "Good, keep me posted.", "Thanks, that's clear.", "Alright, makes sense."
+  "Got it, thanks.", "Noted, continue.", "OK.", "Understood.", "Alright, next.", "Good, go on."
 ];
 const CAT_FLAVOR = {
-  equipment:{intro:"We have a situation with the equipment. Let's go through it.", outro:"Alright, let's get this resolved quickly.", titles:["Equipment Check","Line Trouble","Morning Inspection"]},
-  maintenance:{intro:"I need an update on the maintenance work.", outro:"Good work, keep the schedule on track.", titles:["Maintenance Update","Workshop Review","Repair Status"]},
-  safety:{intro:"Before we start, let's review the safety points.", outro:"Stay safe out there.", titles:["Safety Walkthrough","Toolbox Talk","Hazard Review"]},
-  meetings:{intro:"Let's go through today's agenda.", outro:"Thanks everyone, that's all for today.", titles:["Production Meeting","Weekly Planning","Team Sync"]},
-  quality:{intro:"Let's check the quality results.", outro:"Good, let's keep monitoring it.", titles:["Quality Review","Lab Results","Clinker Check"]},
-  interview:{intro:"Thanks for coming in today. Let's begin.", outro:"Thank you, we'll be in touch soon.", titles:["Promotion Interview","HR Interview","Panel Discussion"]},
-  handover:{intro:"Let's do the shift handover.", outro:"Thanks, have a good shift.", titles:["Shift Handover","End of Shift Report","Changeover Briefing"]},
-  logistics:{intro:"Let's review today's logistics.", outro:"Alright, let's keep things moving.", titles:["Logistics Review","Dispatch Check","Stock Update"]}
+  equipment:{intro:"Let's go through this together, point by point.", outro:"Alright, that covers it for now.", titles:["Equipment Check","Line Trouble","Morning Inspection"]},
+  maintenance:{intro:"Give me your maintenance update, one point at a time.", outro:"Good, that's a clear update.", titles:["Maintenance Update","Workshop Review","Repair Status"]},
+  safety:{intro:"Let's run through the safety points one by one.", outro:"Good, thanks for going through that.", titles:["Safety Walkthrough","Toolbox Talk","Hazard Review"]},
+  meetings:{intro:"Let's go through today's points one at a time.", outro:"Thanks everyone, that covers today.", titles:["Production Meeting","Weekly Planning","Team Sync"]},
+  quality:{intro:"Talk me through the quality points, one at a time.", outro:"Good, let's keep monitoring it.", titles:["Quality Review","Lab Results","Clinker Check"]},
+  interview:{intro:"Let's go through a few points, one at a time.", outro:"Thank you, we'll be in touch soon.", titles:["Promotion Interview","HR Interview","Panel Discussion"]},
+  handover:{intro:"Let's do the handover, point by point.", outro:"Thanks, have a good shift.", titles:["Shift Handover","End of Shift Report","Changeover Briefing"]},
+  logistics:{intro:"Talk me through today's points, one at a time.", outro:"Alright, let's keep things moving.", titles:["Logistics Review","Dispatch Check","Stock Update"]}
 };
 function buildLocalScenario(picked, catKey, roleName){
   const flavor = CAT_FLAVOR[catKey] || CAT_FLAVOR.equipment;
@@ -435,12 +497,45 @@ function buildLocalScenario(picked, catKey, roleName){
   return {title: pick(flavor.titles), role_name: roleName, category: catKey, turns};
 }
 
-document.getElementById('genBtn').addEventListener('click', ()=>{
+document.getElementById('genBtn').addEventListener('click', async ()=>{
   const n = parseInt(document.getElementById('numSentences').value, 10);
   const picked = pickDueSentences(scenarioCat, n);
   if(!picked.length){ toast('مفيش جمل كفاية في الموقف ده'); return; }
   const catKey = scenarioCat==='all' ? picked[0].category : scenarioCat;
   const roleName = ROLE_BY_CAT[catKey] || 'Colleague';
+  const btn = document.getElementById('genBtn');
+
+  if(getGeminiKey()){
+    btn.disabled = true; btn.textContent = 'بيبني الموقف بالذكاء الاصطناعي...';
+    const list = picked.map((s,i)=> (i+1)+'. "'+s.text+'"').join('\n');
+    const prompt = 'Build a short workplace roleplay dialogue for an English-practice app used by a cement-plant kiln operator in Egypt preparing for a "Kiln Section Head" promotion interview.\n'+
+      'Situation category: '+catKey+'. Counterpart role: "'+roleName+'".\n\n'+
+      'These sentences MUST each appear verbatim, unmodified, exactly once, as one of the operator\'s ("YOU") lines:\n'+list+'\n\n'+
+      'Write a natural 6-10 line English dialogue between "'+roleName+'" and "YOU" set at a cement plant, that leads naturally into each required sentence with a logically matching cue. Add short realistic counterpart lines. Clear professional B1-B2 English.\n\n'+
+      'Reply with ONLY raw JSON, no markdown fences:\n'+
+      '{"title":"short scene title","role_name":"'+roleName+'","turns":[{"speaker":"AI","text":"..."},{"speaker":"YOU","text":"exact sentence 1","sentence_index":1}, ...]}\n'+
+      'sentence_index is the 1-based number from the required list above for YOU turns that use one of them, otherwise omit it. Every required sentence must appear exactly once, verbatim.';
+    const raw2 = await callGemini(prompt);
+    const data = parseJsonLoose(raw2);
+    btn.disabled = false; btn.textContent = '🎬 ابني السيناريو';
+    if(data && Array.isArray(data.turns)){
+      const turns = data.turns.map(t=>{
+        const out = {speaker: t.speaker==='YOU'?'YOU':'AI', text: String(t.text||'').trim()};
+        if(t.sentence_index && picked[t.sentence_index-1]) out.sentenceId = picked[t.sentence_index-1].id;
+        return out;
+      }).filter(t=>t.text);
+      picked.forEach(p=>{
+        if(!turns.some(t=>t.sentenceId===p.id)){
+          turns.push({speaker:'AI', text:'Go ahead, next point.'});
+          turns.push({speaker:'YOU', text:p.text, sentenceId:p.id});
+        }
+      });
+      scenario = {title: data.title || 'Practice scenario', role_name: data.role_name || roleName, category: catKey, turns};
+      startScenarioPlayer();
+      return;
+    }
+    toast('الذكاء الاصطناعي مارجعش رد سليم — هستخدم الموقف المحلي بدل منه');
+  }
   scenario = buildLocalScenario(picked, catKey, roleName);
   startScenarioPlayer();
 });
@@ -706,6 +801,7 @@ document.getElementById('exportBtn').addEventListener('click', ()=>{
   toast('اتحفظ التقرير');
 });
 
+refreshKeyStatus();
 loadState();
 })();
 </script>
